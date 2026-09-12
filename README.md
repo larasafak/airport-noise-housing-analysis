@@ -30,12 +30,7 @@ airport-noise-housing-analysis/
 ├── README.md
 ├── requirements.R
 ├── airport_noise_housing_analysis.Rmd
-├── airport_housing_market_analysis_report.pdf
 ├── airport_housing_market_analysis_presentation.pptx
-├── airport_housing_market_analysis_presentation.pdf
-├── data/
-│   └── real_estate.xlsx                 # not included
-└── outputs/                             # generated tables and processed data
 ```
 
 ## Methods
