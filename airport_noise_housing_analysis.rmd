@@ -1,0 +1,685 @@
+---
+author: "Lara Gunseli Safak"
+date: "2025-11-27"
+output: html_document
+---
+
+# 1. Data Preperation
+
+## 1.1 Installing and Loading Required Libraries
+
+```{r}
+install.packages("GGally")
+install.packages("ggthemes")
+install.packages("writexl")
+
+library(tidyverse)      # Data manipulation and visualization
+library(readxl)         # Reading Excel files
+library(janitor)        # Data cleaning
+library(visdat)         # Data visualization
+library(scales)         # Scale functions for plots
+library(broom)          # Tidy model outputs
+library(GGally)         # Correlation plots
+library(patchwork)      # Combine plots
+library(corrplot)       # Correlation matrices
+library(knitr)          # Table formatting
+library(kableExtra)     # Enhanced tables
+library(ggthemes)       # Plot themes
+library(writexl)
+```
+
+## 1.2 Loading Data
+
+```{r}
+file_path <- "~/Desktop/Data /real_estate.xlsx" 
+
+# Load Salinas data
+salinas_data <- read_excel(file_path, sheet = "salinas_data") %>%
+  clean_names() %>%
+  mutate(airport = "Salinas")
+
+# Load Watsonville data
+watsonville_data <- read_excel(file_path, sheet = "watsonville_data") %>%
+  clean_names() %>%
+  mutate(airport = "Watsonville")
+```
+
+Before conducting any analysis, the two datasets need to be standardised and combined into a single, tidy data frame.We apply `clean_names()` from the `janitor` package to convert column names into a consistent format (lowercase, no spaces, snake_case). This avoids errors later when referencing variables inside `dplyr` or `ggplot2` functions. Because both sheets contain identical column names, we add a new variable `airport` to each dataset. This allows us to distinguish observations from Salinas and Watsonville, compare airports directly in visualisations and summaries and facet and group data cleanly during EDA.
+
+## 1.3 Combining Datasets
+
+```{r}
+data_airport <- bind_rows(salinas_data, watsonville_data)
+
+# Display basic information
+cat("Salinas properties:", nrow(salinas_data), "\n")
+cat("Watsonville properties:", nrow(watsonville_data), "\n")
+cat("Total properties:", nrow(data_airport), "\n")
+cat("Number of variables:", ncol(data_airport), "\n")
+```
+
+```{r}
+head(data_airport)
+```
+
+Finally, we merge the Salinas and Watsonville datasets using `bind_rows()`. This creates a single unified dataset (`data_airport`) with 2,122 properties and 21 variables, which we use for all subsequent analysis and visualisation.
+
+## 1.4 Data Inspection
+
+```{r}
+glimpse(data_airport)
+```
+
+```{r}
+summary(data_airport)
+```
+
+# 2. Data Quality Check
+
+## 2.1 Missing Entries
+
+```{r}
+# Check for missing values
+miss_pattern <- data_airport %>%
+  summarise(across(
+    everything(),
+    list(
+      n_missing = ~sum(is.na(.)),
+      pct_missing = ~round(mean(is.na(.)) * 100, 2)
+    )
+  ))
+
+# Transpose for better readability
+t(miss_pattern)
+```
+
+We first examined the completeness of the dataset by computing the number and percentage of missing values for each variable. The results show that there are no missing entries across any of the 21 variables for either airport. This means we do not need to perform imputation, and all subsequent analyses can rely on the full sample of 2,122 properties.
+
+## 2.2 Removing the Suspicious Records
+
+```{r}
+data_airport <- data_airport %>%
+  # keep only plausible construction years: integer and ≤ 2018
+  filter(yearbuilt <= 2018,
+         yearbuilt == floor(yearbuilt))
+```
+
+“During data inspection, we identified two anomalous values in `yearbuilt`: one property recorded as 2019 and two with a non-integer year (1949.76). Because the case materials describe CNEL and housing data collected up to 2018, we treat these as data entry or encoding errors. To avoid introducing unrealistic ages into the analysis, these two records were removed from the dataset (reducing the sample from 2,122 to 2,120 properties). This adjustment does not materially affect the results.”
+
+## 2.3 Variable Type Consistency
+
+```{r}
+sapply(data_airport, class)
+```
+
+```{r}
+data_airport <- data_airport %>%
+  mutate(
+    airport = factor(airport),
+  )
+str(data_airport)
+```
+
+We checked the consistency of variable types to ensure that numeric and categorical fields were correctly imported. Most structural variables (price, size, CNEL value, bedrooms, year built, driving distance, latitude/longitude) were already numeric. The only required adjustments were converting `airport` to a factor. No other coercions were necessary.
+
+## 2.4 Adding New Variables
+
+```{r}
+data_airport <- data_airport %>%
+  mutate(
+    # Property age (data is from 2018)
+    property_age = 2018 - yearbuilt,
+    
+    # Noise categories based on case description
+    noise_category = case_when(
+      cnelvalue >= 65 ~ "Very High (65 dB)",
+      cnelvalue >= 60 ~ "High (60 dB)",
+      cnelvalue >= 55 ~ "Moderate (55 dB)",
+      TRUE ~ "Low (50 dB)"
+    ),
+    noise_category = factor(
+      noise_category,
+      levels = c("Low (50 dB)", 
+                 "Moderate (55 dB)", 
+                 "High (60 dB)", 
+                 "Very High (65 dB)")
+    ),
+    
+    # Distance categories
+    distance_category = case_when(
+      drvng_dist_mls < 1 ~ "Very Close (<1 mile)",
+      drvng_dist_mls < 2 ~ "Close (1-2 miles)",
+      drvng_dist_mls < 3 ~ "Moderate (2-3 miles)",
+      TRUE ~ "Far (3+ miles)"
+    ),
+    distance_category = factor(
+      distance_category,
+      levels = c("Very Close (<1 mile)",
+                 "Close (1-2 miles)",
+                 "Moderate (2-3 miles)",
+                 "Far (3+ miles)")
+    )
+  )
+```
+
+The derived variables such as noise bands (based on CNEL values) and distance categoriesare created here. The transformation do not affect any of the core distributions and can assist later when checking for potential confounding factors or extreme values.
+
+# 3. Exploratory Data Analysis (EDA)
+
+## 3.1 Summary Statistics
+
+### Table 1: Pricing, Noise, Distance adn Square Feet Comparision of Airports
+
+```{r}
+# Step 1 — Create summary table as before
+summary_table_1 <- data_airport %>%
+  group_by(airport) %>%
+  summarise(
+    n_properties = n(),
+    avg_price    = mean(zillowvaluezestimate, na.rm = TRUE),
+    median_price = median(zillowvaluezestimate, na.rm = TRUE),
+    sd_price     = sd(zillowvaluezestimate, na.rm = TRUE),
+    avg_noise    = mean(cnelvalue, na.rm = TRUE),
+    min_noise    = min(cnelvalue, na.rm = TRUE),
+    max_noise    = max(cnelvalue, na.rm = TRUE),
+    avg_distance = mean(drvng_dist_mls, na.rm = TRUE),
+    min_distance = min(drvng_dist_mls, na.rm = TRUE),
+    max_distance = max(drvng_dist_mls, na.rm = TRUE)
+  ) %>%
+  mutate(across(where(is.numeric), ~ round(.x, 2)))
+
+
+# Step 2 — Transpose / pivot wider
+summary_table_1_t <- summary_table_1 %>%
+  pivot_longer(
+    cols = -airport,
+    names_to = "Metric",
+    values_to = "Value"
+  ) %>%
+  pivot_wider(
+    names_from = airport,
+    values_from = Value
+  )
+
+# Step 3 — Clean display names
+summary_table_1_t$Metric <- recode(summary_table_1_t$Metric,
+  n_properties = "Number of Properties",
+  avg_price    = "Average Price (USD)",
+  median_price = "Median Price (USD)",
+  sd_price     = "Standard Deviation of Price",
+  avg_noise    = "Average Noise (dB)",
+  min_noise    = "Minimum Noise (dB)",
+  max_noise    = "Maximum Noise (dB)",
+  avg_distance = "Average Distance (mi)",
+  min_distance = "Minimum Distance (mi)",
+  max_distance = "Maximum Distance (mi)"
+)
+
+
+# Step 4 — Final clean formatted table
+summary_table_1_t %>%
+  kbl(
+    caption = "Table 1: Pricing, Noise, and Distance — Salinas vs Watsonville",
+    align = "lrr",
+    col.names = c("Metric", "Salinas", "Watsonville"),
+    format.args = list(big.mark = ",")
+  ) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover"),
+    full_width = FALSE,
+    font_size = 13
+  ) %>%
+  column_spec(1, bold = TRUE)
+
+
+```
+
+```{r}
+write_xlsx(summary_table_1_t, "~/Desktop/Summary_Table_1.xlsx")
+```
+
+### Table 2: Ranges of the Variables
+
+```{r}
+
+# Define variables to summarise
+vars_to_summarise <- c(
+  "zillowvaluezestimate",
+  "cnelvalue",
+  "drvng_dist_mls",
+  "sq_ft",
+  "numberofbedrooms",
+  "numberofbathrooms",
+  "property_age"
+)
+
+# Summary table
+summary_raw <- data_airport %>%
+  summarise(across(
+    all_of(vars_to_summarise),
+    list(
+      Min  = ~min(., na.rm = TRUE),
+     Mean = ~mean(., na.rm = TRUE),
+      Max  = ~max(., na.rm = TRUE)
+    )
+  ))
+
+summary_table <- summary_raw %>%
+  pivot_longer(
+    everything(),
+    names_to  = c("Variable", "Statistic"),
+    names_pattern = "(.*)_(Min|Max|Mean)"
+  ) %>%
+  pivot_wider(
+    names_from = Statistic,
+    values_from = value
+  ) %>%
+  mutate(
+    Variable = recode(Variable,
+      zillowvaluezestimate = "Property value (USD)",
+      cnelvalue            = "CNEL noise level (dB)",
+      drvng_dist_mls       = "Driving distance (miles)",
+      sq_ft                = "Property size (sq ft)",
+      numberofbedrooms     = "Bedrooms (count)",
+      numberofbathrooms    = "Bathrooms (count)",
+      property_age         = "Property age (years)"
+    ),
+    Min  = round(Min, 1),
+    Mean = round(Mean, 1),
+    Max  = round(Max, 1)
+  )
+
+```
+
+```{r}
+# Kable output
+summary_table %>%
+  kbl(caption = "Summary statistics for key variables",
+      align = "lrrr") %>%
+  kable_styling(full_width = FALSE)
+```
+
+```{r}
+write_xlsx(summary_table, "~/Desktop/Summary_Table.xlsx")
+```
+
+To provide a structured overview of the two local housing markets, we split the descriptive statistics into two tables.\
+Table 1 summarises variables most directly linked to the case questions, including property values, noise exposure and proximity to the terminal.\
+Table 2 covers supplementary characteristics such as property size, estimated age, and normalised price metrics (price per square foot).
+
+### Table 3 and 4: Categorical Variable Distributions
+
+```{r}
+
+# Noise category distribution
+noise_tab <- data_airport %>% 
+  count(noise_category) %>% 
+  mutate(percent = percent(n / sum(n)))
+
+noise_tab %>% 
+  kbl(
+    caption = "Noise Category Distribution",
+    col.names = c("Noise category", "Count", "Percent")
+  ) %>% 
+  kable_styling(full_width = FALSE)
+
+# Distance category distribution
+dist_tab <- data_airport %>% 
+  count(distance_category) %>% 
+  mutate(percent = percent(n / sum(n)))
+
+dist_tab %>% 
+  kbl(
+    caption = "Distance Category Distribution",
+    col.names = c("Distance category", "Count", "Percent")
+  ) %>% 
+  kable_styling(full_width = FALSE)
+
+```
+
+```{r}
+write_xlsx(noise_tab, "~/Desktop/Noise Category Distribution.xlsx")
+```
+
+```{r}
+write_xlsx(dist_tab, "~/Desktop/Distance Category Distribution.xlsx")
+```
+
+## 3.2 Distribution Checks
+
+We first examine the marginal distributions of key variables (property values, distance to the terminal, and CNEL noise levels) to understand the structure of the two benchmark markets before turning to bivariate relationships. These distributions help identify skewness, clustering, and potential outliers, and they provide useful context for interpreting relationships later in the analysis.
+
+### 3.2.1 Property Value Distribution by Airport Terminal
+
+```{r}
+ggplot(data_airport, aes(x = zillowvaluezestimate, fill = airport)) +
+  geom_histogram(bins = 50, alpha = 0.6, position = "identity", color = "black") +
+  geom_vline(
+    data = data_airport %>% 
+      group_by(airport) %>% 
+      summarise(mean_price = mean(zillowvaluezestimate)),
+    aes(xintercept = mean_price, color = airport),
+    linetype = "dashed", linewidth = 1.2
+  ) +
+  scale_x_continuous(labels = dollar_format()) +
+  scale_fill_manual(values = c("Salinas" = "#2E86AB", "Watsonville" = "#A23B72")) +
+  scale_color_manual(values = c("Salinas" = "#2E86AB", "Watsonville" = "#A23B72")) +
+  labs(
+    title = "Property Value Distribution by Airport",
+    subtitle = "Watsonville properties command significantly higher prices",
+    x = "Property Value ($)",
+    y = "Frequency",
+    fill = "Airport",
+    color = "Mean Value"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold", size = 16),
+    legend.position = "right"
+  )
+```
+
+# 4. Key Relationships
+
+## 4.1 Relationship Between Property Value and Distance to the Airport Terminal
+
+```{r}
+ggplot(data_airport, aes(x = drvng_dist_mls, y = zillowvaluezestimate, color = airport)) +
+  geom_point(alpha = 0.35, size = 1.2) +
+  geom_smooth(method = "lm", se = FALSE, linewidth = 1.1) +
+  scale_color_manual(values = c("Salinas" = "#2E86AB", "Watsonville" = "#A23B72")) +
+  scale_y_continuous(labels = scales::dollar_format()) +
+  labs(
+    title = "Relationship Between Property Value and Distance to the Airport Terminal",
+    subtitle = "Linear trends reveal how proximity correlates with housing prices in each market",
+    x = "Driving distance to terminal (miles)",
+    y = "Property Value (USD)",
+    color = "Airport"
+  ) +
+  theme_minimal(base_size = 10) +
+  theme(
+    plot.title = element_text(face = "bold", size = 12),
+    legend.position = "bottom"
+  ) +
+  facet_wrap(~ airport)
+
+```
+
+## 4.2 Relationship Between Property Value and Noise Levels
+
+```{r}
+cor_overall <- cor(data_airport$cnelvalue, data_airport$zillowvaluezestimate)
+
+ggplot(data_airport, aes(x = cnelvalue, y = zillowvaluezestimate)) +
+  geom_point(alpha = 0.3, size = 2, color = "#3498db") +
+  geom_smooth(method = "lm", se = TRUE, color = "red", linewidth = 1.2) +
+  scale_y_continuous(labels = dollar_format()) +
+  annotate(
+    "text", x = Inf, y = Inf, 
+    label = sprintf("Overall correlation: r = %.3f\n", cor_overall),
+    hjust = 1.1, vjust = 2, size = 5, fontface = "bold", color = "red"
+  ) +
+  labs(
+    title = "Property Value vs Noise Level - Overall Relationship",
+    subtitle = "Positive correlation appears but is MISLEADING due to location differences",
+    x = "CNEL Value (dB)",
+    y = "Property Value ($)"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(plot.title = element_text(face = "bold", size = 16))
+```
+
+When examining the full dataset, property values appear to rise with higher CNEL noise levels (r = 0.324). However, this relationship is misleading: the two airports have very different baseline price levels. The positive correlation is driven by Watsonville having higher prices overall **and** higher noise levels, not by noise increasing prices. Because of this confounding, we next analyse each airport separately.
+
+```{r}
+correlations <- data_airport %>%
+  group_by(airport) %>%
+  summarise(
+    correlation = cor(cnelvalue, zillowvaluezestimate),
+    correlation_label = sprintf("r = %.3f", correlation)
+  )
+
+ggplot(data_airport, aes(x = cnelvalue, y = zillowvaluezestimate)) +
+  geom_point(aes(color = airport), alpha = 0.3, size = 2) +
+  geom_smooth(method = "lm", se = TRUE, color = "black", linewidth = 1.2) +
+  geom_text(
+    data = correlations,
+    aes(x = Inf, y = Inf, label = correlation_label),
+    hjust = 1.1, vjust = 2, size = 5, fontface = "bold"
+  ) +
+  scale_y_continuous(labels = dollar_format()) +
+  scale_color_manual(values = c("Salinas" = "#2E86AB", "Watsonville" = "#A23B72")) +
+  facet_wrap(~ airport, scales = "free") +
+  labs(
+    title = "Price vs Noise: Within-Airport Analysis",
+    subtitle = "Both airports show weak NEGATIVE correlation as expected by NDI theory",
+    x = "CNEL Value (dB)",
+    y = "Property Value ($)",
+    color = "Airport"
+  ) +
+  theme_minimal(base_size = 10) +
+  theme(
+    plot.title = element_text(face = "bold", size = 16),
+    legend.position = "none"
+  )
+```
+
+## 4.3 Property Size and Value by Noise Category
+
+```{r}
+ggplot(
+  data_airport,
+  aes(
+    x = sq_ft,
+    y = zillowvaluezestimate,
+    colour = noise_category
+  )
+) +
+  geom_point(alpha = 0.5) +
+  facet_wrap(~ airport) +
+  scale_y_continuous(labels = dollar_format()) +
+  labs(
+    title = "Property Size and Value by Noise Category",
+    subtitle = "Larger homes command higher prices across all noise bands,\nindicating size is a key confounder",
+    x = "Property size (sq ft)",
+    y = "Property value (USD)",
+    colour = "CNEL noise band"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold", size = 16),
+    legend.position = "bottom",
+    legend.box = "horizontal",
+    legend.direction = "horizontal",
+    legend.key.width = unit(1.2, "cm"),
+    legend.text = element_text(size = 5),
+    legend.title = element_text(size = 8)
+  )
+```
+
+# 5. Confounding Factors
+
+## 5.1 Square Footage vs Proper Value
+
+```{r}
+cor_sqft <- cor(data_airport$sq_ft, data_airport$zillowvaluezestimate)
+
+ggplot(data_airport, aes(x = sq_ft, y = zillowvaluezestimate, color = airport)) +
+  geom_point(alpha = 0.3, size = 2) +
+  geom_smooth(method = "lm", se = TRUE, linewidth = 1.2) +
+  scale_y_continuous(labels = dollar_format()) +
+  scale_color_manual(values = c("Salinas" = "#2E86AB", "Watsonville" = "#A23B72")) +
+  labs(
+    title = "Property Value vs Square Footage",
+    subtitle = "Size is the STRONGEST predictor of value",
+    x = "Square Footage",
+    y = "Property Value ($)",
+    color = "Airport"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(plot.title = element_text(face = "bold", size = 16))
+```
+
+## 5.2 Property Value by Number of Bedrooms
+
+```{r}
+ggplot(data_airport, 
+       aes(x = factor(numberofbedrooms), y = zillowvaluezestimate, fill = airport)) +
+  geom_boxplot(alpha = 0.7, outlier.alpha = 0.3) +
+  scale_y_continuous(labels = dollar_format()) +
+  scale_fill_manual(values = c("Salinas" = "#2E86AB", "Watsonville" = "#A23B72")) +
+  labs(
+    title = "Property Value by Number of Bedrooms",
+    subtitle = "More bedrooms correlate with higher values",
+    x = "Number of Bedrooms",
+    y = "Property Value ($)",
+    fill = "Airport"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(plot.title = element_text(face = "bold", size = 16))
+```
+
+## 5.3 Property Age vs Property Value
+
+```{r}
+cor_age <- cor(data_airport$property_age, data_airport$zillowvaluezestimate)
+
+ggplot(data_airport, aes(x = property_age, y = zillowvaluezestimate, color = airport)) +
+  geom_point(alpha = 0.3, size = 2) +
+  geom_smooth(method = "lm", se = TRUE, linewidth = 1.2) +
+  scale_y_continuous(labels = dollar_format()) +
+  scale_color_manual(values = c("Salinas" = "#2E86AB", "Watsonville" = "#A23B72")) +
+  labs(
+    title = "Property Value vs Property Age",
+    subtitle = "Newer properties command higher prices",
+    x = "Property Age (years)",
+    y = "Property Value ($)",
+    color = "Airport"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(plot.title = element_text(face = "bold", size = 16))
+```
+
+## 6. NDI check
+
+### 6.1 Compute Implied NDI by Noise Band
+
+```{r}
+ndi_df <- data_airport %>%
+  group_by(airport, noise_category) %>%
+  summarise(
+    mean_price = mean(zillowvaluezestimate, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  # midpoint CNEL for each band
+  mutate(
+    noise_mid = case_when(
+    noise_category == "Low (50 dB)"      ~ 52.5,
+    noise_category == "Moderate (55 dB)" ~ 57.5,
+    noise_category == "High (60 dB)"     ~ 62.5,
+    noise_category == "Very High (65 dB)"~ 67.5,
+    TRUE ~ NA_real_
+)
+  ) %>%
+  group_by(airport) %>%
+  arrange(noise_mid, .by_group = TRUE) %>%
+  mutate(
+    # quietest available band in this airport
+    base_price = first(mean_price),
+    base_noise = first(noise_mid),
+    pct_diff   = (mean_price - base_price) / base_price * 100,
+    delta_db   = noise_mid - base_noise,
+    ndi_implied = if_else(delta_db > 0, pct_diff / delta_db, NA_real_)
+  ) %>%
+  ungroup()
+
+```
+
+### 6.2 NDI Plot with Theoretical Band
+
+```{r}
+ggplot(ndi_df, aes(x = noise_mid, y = ndi_implied, colour = airport)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 3) +
+  
+  # NDI theoretical band
+  geom_hline(yintercept = c(-0.45, -0.64),
+             linetype = "dashed", colour = "grey40", linewidth = 0.8) +
+  
+  # Manual consistent colours
+  scale_colour_manual(
+    values = c(
+      "Salinas" = "#2E86AB",       # pink-purple
+      "Watsonville" = "#A23B72"    # blue
+    )
+  ) +
+
+  scale_x_continuous(
+    "CNEL midpoint (dB)",
+    breaks = c(50, 55, 60, 65),
+    labels = c("Low", "Mod", "High", "Very high")
+  ) +
+  
+  scale_y_continuous("Implied NDI (% per dB)") +
+  
+  labs(
+    title = "Implied Noise Depreciation Index by Noise Category",
+    subtitle = "Dashed lines show reference range of -0.45% to -0.64% per dB",
+    colour = "Airport"
+  ) +
+  
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold", size = 16),
+    plot.subtitle = element_text(size = 12),
+    legend.position = "right",
+    legend.title = element_text(face = "bold")
+  )
+
+
+```
+
+“The implied Noise Depreciation Index varies sharply between the two markets. In Watsonville, the estimated depreciation per additional decibel lies close to the commonly cited NDI range (–0.45% to –0.64% per dB), indicating that higher CNEL levels are associated with clear price discounts. In contrast, Salinas shows a much flatter pattern, with implied NDI values around –0.20% to –0.30% per dB. This suggests that noise plays a weaker role in shaping prices in Salinas, where property values are more tightly clustered.
+
+# 7. Correlation Analysis Heatmap
+
+```{r}
+ corr_data <- data_airport %>%
+  select(
+    zillowvaluezestimate, cnelvalue, drvng_dist_mls, sq_ft,
+    numberofbedrooms, numberofbathrooms, property_age,
+    lotsizesqft, parkingspaces,
+    numberoffireplaces, ofstories
+  )
+
+cor_matrix <- cor(corr_data, use = "complete.obs")
+
+print(round(cor_matrix, 3))
+```
+
+```{r}
+corrplot(
+  cor_matrix,
+  method      = "color",
+  type        = "upper",
+  addCoef.col = "black",
+  number.cex  = 0.6,          # numbers inside cells
+  tl.col      = "black",
+  tl.cex      = 0.7,          # axis label size
+  tl.srt      = 30,           # label rotation angle
+  title       = "Correlation Matrix: Property Values and Key Variables",
+  mar         = c(0, 0, 3, 0),
+  col         = colorRampPalette(c("#3498db", "white", "#e74c3c"))(200)
+)
+```
+
+# 8. Exporting the Latest Dataset
+
+```{r}
+# ---- Export cleaned data for visualization ----
+write.csv(
+  data_airport,
+  file = "~/Desktop/data/processed_data.csv",
+  row.names = FALSE
+)
+```
