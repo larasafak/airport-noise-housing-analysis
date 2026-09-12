@@ -42,16 +42,6 @@ airport-noise-housing-analysis/
 - Noise Depreciation Index comparison
 - Confounder analysis covering property size, age, bedrooms, and neighbourhood
 
-## Running the Analysis
-
-Install the required R packages:
-
-```r
-source("requirements.R")
-```
-
-Place an authorised copy of the source workbook at `data/real_estate.xlsx`, then open and knit `airport_noise_housing_analysis.Rmd`.
-
 ## Data Availability
 
 The source workbook is not included because it was provided as academic case material and redistribution rights are unclear. The report and presentation retain the analytical results for review.
